@@ -1,0 +1,209 @@
+---
+title: "Multimodal-KGR"
+author: "Jeffrey Wu"
+format: html
+---
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(xml2)
+library(sf)
+library(tidyverse)
+library(lubridate)
+library(stats)  # for kmeans
+library(geosphere)  # for distance calculation
+```
+
+
+```{r}
+# If first row is junk and real header starts at row 2:
+mortality_df <- read_excel("excess-uk-mortality-1622.xlsx", sheet = 1, skip = 5)
+df2 = mortality_df %>% filter(Geography == "Region")
+
+sept_dates <- format(seq(as.Date("2022-09-01"), as.Date("2022-09-30"), by = "1 day"), "%d-%b")
+colnames(df2)[96:125] = sept_dates
+
+df2$Year = rep(2022:2016, each = 9)
+
+# Step 3: Pivot weekly data columns into long format
+excess_uk_mortality_df <- df2 %>%
+  pivot_longer(
+    cols = matches("\\d{2}-[A-Za-z]{3}"),  # Match date columns like "03-Apr-2020"
+    names_to = "day-month",
+    values_to = "excess_deaths"
+  )
+
+#Only interested in excess mortality being non-negative
+# excess_uk_mortality_df$excess_deaths[excess_uk_mortality_df$excess_deaths < 0] = 0
+```
+
+# Extracting temperature data from each station csv
+
+```{r}
+# # If first row is junk and real header starts at row 2:
+# station_df <- read.csv("durham-00326.csv", skip = 91)
+# 
+# # View column names
+# # head(df)
+# # 
+# # df %>%
+# #   filter(is.na(mdy_hm(ob_end_time))) %>%
+# #   distinct(ob_end_time) %>%
+# #   pull(ob_end_time)
+# 
+# # Process and summarize
+# station_clean_df <- station_df %>%
+#   mutate(
+#     ob_end_time = mdy_hm(ob_end_time),     # Parse datetime like "1/1/2022 9:00"
+#     date = as_date(ob_end_time)
+#   ) %>%
+#   filter(date >= ymd("2022-06-01") & date <= ymd("2022-09-30")) %>%
+#   group_by(date) %>%
+#   summarise(avg_max_air_temp = mean(max_air_temp, na.rm = TRUE)) %>%
+#   ungroup()
+# 
+# # View the result
+# head(station_clean_df)
+
+
+extract_station_data = function(file,year){
+  station_df = read.csv(file, skip = 91)
+  print(colnames(station_df))
+  
+  date1 = sprintf("%d-06-01",year)
+  date2 = sprintf("%d-09-30",year)
+  
+  # Process and summarize
+  station_clean_df <- station_df %>%
+    mutate(
+      ob_end_time = mdy_hm(ob_end_time),
+      date = as_date(ob_end_time)
+    ) %>%
+    filter(date >= ymd(date1) & date <= ymd(date2)) %>%
+    group_by(date) %>%
+    summarise(avg_max_air_temp = mean(max_air_temp, na.rm = TRUE)) %>%
+    ungroup()
+  
+  return(station_clean_df)
+}
+
+# durham_df = extract_station_data("wallington-2016.csv",year=2016)
+
+# Set folder and year
+folder_path <- "C:/Users/jeffr/Desktop/Conference Paper/midas-station-data"
+csv_files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+year <- 2023  # Replace with the actual year
+
+# Combine results
+all_data <- do.call(rbind, lapply(csv_files, extract_station_data, year = year))
+```
+
+
+```{r,warning=FALSE}
+# Your function with station name and year extraction support
+extract_station_data <- function(file){
+  # Extract year and station name from filename
+  filename <- basename(file)
+  year <- as.numeric(str_extract(filename, "\\d{4}"))
+  station <- str_remove(filename, "-\\d{4}\\.csv$")
+
+  # Read and process data
+  station_df <- read.csv(file, skip = 91)
+
+  date1 <- sprintf("%d-06-01", year)
+  date2 <- sprintf("%d-09-30", year)
+
+  station_clean_df <- station_df %>%
+    mutate(
+      ob_end_time = parse_date_time(ob_end_time, orders = c("mdy HM", "mdy HMS", "mdy", "ymd HMS", "ymd HM")),
+      date = as_date(ob_end_time)
+    ) %>%
+    filter(!is.na(date)) %>%
+    filter(date >= ymd(date1) & date <= ymd(date2)) %>%
+    group_by(date,src_id) %>%
+    summarise(avg_max_air_temp = mean(max_air_temp, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(station = station)
+
+  return(station_clean_df)
+}
+
+# Read all files and combine into one dataframe
+folder_path <- "C:/Users/jeffr/Desktop/Conference Paper/midas-station-data"
+csv_files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+
+all_station_data <- do.call(rbind, lapply(csv_files, extract_station_data))
+```
+
+```{r}
+###NEXT STEP GROUP BY REGION AND AGGREGATE TO DAILY AVG MAX TEMP BY REGION
+
+northeast_src_ids <- c(289, 300, 315, 326, 17182, 17183)
+northwest_src_ids <- c(1060, 1066, 1067, 1090, 1111, 1112)
+yorkshire_humber_src_ids <- c(339, 346, 358, 525, 513, 516, 529, 370, 373, 382)
+east_midlands_src_ids <- c(539, 542, 56423, 30529, 381, 384, 386, 554, 556, 19204)
+west_midlands_src_ids <- c(622, 628, 30690, 595, 596, 19187, 56424, 657, 660, 669)
+east_england_src_ids <- c(454, 455, 456, 481, 487, 498, 471, 62057, 407, 409, 421, 413, 435, 436)
+london_src_ids <- c(697, 708, 709)
+southeast_src_ids <- c(808, 811, 818, 779, 782, 795, 844, 847, 855, 730, 742, 743, 605, 606, 607, 719, 720, 30620)
+southwest_src_ids <- c(1336, 1345, 1346, 688, 691, 692, 1285, 1291, 1302)
+
+
+region_lookup <- tibble::tibble(
+  src_id = c(
+    northeast_src_ids,
+    northwest_src_ids,
+    yorkshire_humber_src_ids,
+    east_midlands_src_ids,
+    west_midlands_src_ids,
+    east_england_src_ids,
+    london_src_ids,
+    southeast_src_ids,
+    southwest_src_ids
+  ),
+  region = c(
+    rep("NORTH EAST", length(northeast_src_ids)),
+    rep("NORTH WEST", length(northwest_src_ids)),
+    rep("YORKSHIRE AND THE HUMBER", length(yorkshire_humber_src_ids)),
+    rep("EAST MIDLANDS", length(east_midlands_src_ids)),
+    rep("WEST MIDLANDS", length(west_midlands_src_ids)),
+    rep("EAST", length(east_england_src_ids)),
+    rep("LONDON", length(london_src_ids)),
+    rep("SOUTH EAST", length(southeast_src_ids)),
+    rep("SOUTH WEST", length(southwest_src_ids))
+  )
+)
+
+
+all_station_data_labeled <- all_station_data %>%
+  left_join(region_lookup, by = "src_id")
+
+region_daily_maxtemp_df = all_station_data_labeled %>% group_by(region,date) %>% summarise(avg_max_temp = mean(avg_max_air_temp,na.rm = TRUE))
+```
+
+# Assemble final dataset with daily excess mortality and max air temp
+
+```{r}
+#Prepare for the join
+excess_uk_mortality_df2 = excess_uk_mortality_df %>% filter(Year <= 2018)
+
+excess_clean <- excess_uk_mortality_df2 %>%
+  mutate(region = str_to_title(`Area of usual residence`))
+
+region_clean <- region_daily_maxtemp_df %>%
+  mutate(region = str_to_title(region))
+
+# Optional: trim whitespace too
+excess_clean <- excess_clean %>% mutate(region = str_trim(region))
+region_clean <- region_clean %>% mutate(region = str_trim(region))
+
+excess_clean = excess_clean %>% mutate(date = ydm(paste(Year, `day-month`, sep = "-")))
+
+#Make the join
+multimodal_df = excess_clean %>% left_join(region_clean,by = c("region","date")) %>% mutate(month = month(date))
+multimodal_df = multimodal_df[,4:10]
+saveRDS(multimodal_df,"multimodal_df.rds")
+```
