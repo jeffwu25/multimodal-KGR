@@ -1,0 +1,1157 @@
+---
+title: "Multimodal-KGR-4"
+format: html
+---
+
+```{r}
+load("Multimodal-KGR-2-4.24.RData")
+
+library(readxl)
+library(tidyr)
+library(lubridate)
+library(xml2)
+library(sf)
+library(tidyverse)
+library(lubridate)
+library(stats)
+library(geosphere)
+library(scales)
+library(reshape2)
+library(huge)
+library(INLA)
+library(brinla)
+library(QRM)
+library(dplyr)
+library(lhs)
+library(copula)
+library(Matrix)
+```
+
+# Do out of sample forecast with KGR models
+
+```{r}
+multimodal_df2 = multimodal_df
+
+omit_idx = which(multimodal_df2$time > 115)
+multimodal_df2$excess_deaths[omit_idx] = NA
+multimodal_df2$avg_max_temp[omit_idx] = NA
+```
+
+## Excess deaths
+
+### Rolling one step ahead forecast
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates (days 116-122) with credible interval bands OVERLAID on response
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(excess_deaths)
+  preds = starting_data_deaths %>% dplyr::filter(region == regions[i]) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  title = sprintf(regions[i])
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=excess_deaths)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) +
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + 
+    theme_classic()
+  print(post_pred_plot)
+}
+```
+
+### Forecast all 6 days at once 
+
+```{r}
+deaths_outfit = kgr_model1_deaths(multimodal_df2,rho_time_rbf = 0.0757,rho_time_periodic = 0.0015,
+                                  sigma2_time = 0.0437, link = 1)
+
+# deaths_outfit = kgr_model1_deaths(multimodal_df2,rho_time_rbf = 1, rho_time_periodic = 1,
+#                                   sigma2_time = 1, link = 1)
+
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(excess_deaths)
+  preds = deaths_outfit$fitted_values %>% dplyr::filter(region == regions[i])
+  df = cbind(df,preds)
+  df = df %>% arrange(date) %>% mutate(time = c(1:nrow(df)))
+  
+  title = regions[i]
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=excess_deaths)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + 
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + theme_classic()
+  
+  print(post_pred_plot)
+}
+```
+
+## Avg max temp
+
+### Rolling one step ahead forecast
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates (days 116-122) with credible interval bands OVERLAID on response
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(avg_max_temp)
+  preds = starting_data_temp %>% dplyr::filter(region == regions[i]) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  title = sprintf(regions[i])
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=avg_max_temp)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) +
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + 
+    theme_classic()
+  print(post_pred_plot)
+}
+```
+
+### Forecast all 6 days at once 
+
+```{r}
+temp_outfit = kgr_model1_temp(multimodal_df2,rho_time_rbf = 91.698,rho_time_periodic = 9.8398,
+                              sigma2_time = 43.382, link = 1)
+
+# temp_outfit = kgr_model1_temp(multimodal_df2,rho_time_rbf = 1, rho_time_periodic = 1,
+#                               sigma2_time = 1, link = 1)
+
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(avg_max_temp,Year)
+  preds = temp_outfit$fitted_values %>% dplyr::filter(region == regions[i])
+  df = cbind(df,preds)
+  df = df %>% arrange(date) %>% mutate(time = c(1:nrow(df)))
+  
+  title = regions[i]
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=avg_max_temp)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = `0.025quant`,ymax = `0.975quant`),alpha = 0.3) + 
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + theme_classic()
+  
+  print(post_pred_plot)
+}
+```
+
+
+
+# Fitting the copula with IFM
+
+## Obtain marginal CDF for each fitted value 
+
+```{r}
+# Function to compute CDF from discrete marginal
+compute_cdf_at_value <- function(marginal, fitted_value,extra_col = FALSE) {
+  # Normalize the densities first
+  if(extra_col){
+    density = marginal[,3] / sum(marginal[,3])
+  } else{
+    density = marginal[,2] / sum(marginal[,2])
+  }
+  
+  # Cumulative sum of densities for x <= fitted_value
+  idx <- which(marginal[,1] <= fitted_value)
+  
+  if (length(idx) == 0) {
+    return(0)
+  }
+  return(cumsum(density[idx])[length(idx)])
+}
+
+compute_cdfs_for_all <- function(marginals, fitted_values, extra_col = FALSE) {
+  stopifnot(length(marginals) == length(fitted_values))
+  cdfs <- numeric(length(fitted_values))
+  
+  for (i in seq_along(fitted_values)) {
+    cdfs[i] <- compute_cdf_at_value(marginals[[i]], fitted_values[i], extra_col)
+  }
+  return(cdfs)
+}
+```
+
+
+Need to estimate a 2NT dimensional copula - so should feed in outfit models right? 
+
+```{r}
+#Deaths
+death_preds = deaths_outfit$fitted_values
+death_post_dists = deaths_outfit$marg_fitted_values
+
+###Need to transform estimates of lambda to F
+F_preds = c()
+
+for (i in 1:nrow(death_preds)){
+  
+  Fmean = log(death_preds$mean[i])
+  Fdist = log(death_post_dists[[i]][,1])
+  
+  #Subtract region fixed effect
+  if(death_preds$region[i] == "North East"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_1",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_1",1]
+  } else if(death_preds$region[i] == "North West"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_2",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_2",1]
+  } else if(death_preds$region[i] == "Yorkshire And The Humber"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_3",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_3",1]
+  } else if(death_preds$region[i] == "East Midlands"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_4",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_4",1]
+  } else if(death_preds$region[i] == "West Midlands"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_5",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_5",1]
+  } else if(death_preds$region[i] == "East"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_6",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_6",1]
+  } else if(death_preds$region[i] == "London"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_7",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_7",1]
+  } else if(death_preds$region[i] == "South East"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_8",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_8",1]
+  } else if(death_preds$region[i] == "South West"){
+    Fmean = Fmean - deaths_outfit$model_summary["Intercept_9",1]
+    Fdist = Fdist - deaths_outfit$model_summary["Intercept_9",1]
+  }
+  
+  ###same for month fixed effects
+  if(months(death_preds$date[i]) == "June"){
+    Fmean = Fmean - deaths_outfit$model_summary["factor(month)6",1]
+    Fdist = Fdist - deaths_outfit$model_summary["factor(month)6",1]
+  } else if(months(death_preds$date[i]) == "July"){
+    Fmean = Fmean - deaths_outfit$model_summary["factor(month)7",1]
+    Fdist = Fdist - deaths_outfit$model_summary["factor(month)7",1]
+  } else if(months(death_preds$date[i]) == "August"){
+    Fmean = Fmean - deaths_outfit$model_summary["factor(month)8",1]
+    Fdist = Fdist - deaths_outfit$model_summary["factor(month)8",1]
+  } else if(months(death_preds$date[i]) == "September"){
+    Fmean = Fmean - deaths_outfit$model_summary["factor(month)9",1]
+    Fdist = Fdist - deaths_outfit$model_summary["factor(month)9",1]
+  }
+  
+  
+  F_preds[i] = Fmean
+  death_post_dists[[i]] = cbind(Fdist,death_post_dists[[i]])
+  colnames(death_post_dists[[i]])[1] = "fhat"
+}
+
+
+# compute_cdf_at_value(marginal = death_post_dists[[500]], fitted_value = F_preds[500], extra_col = TRUE)
+u_deaths = compute_cdfs_for_all(marginals = death_post_dists, fitted_values = F_preds, extra_col = TRUE)
+
+###temp
+temp_preds = temp_outfit$fitted_values$mean
+
+# compute_cdf_at_value(marginal = temp_outfit$marg_fitted_values[[2]], fitted_value = temp_preds[2])
+u_temps = compute_cdfs_for_all(marginals = temp_outfit$marg_fitted_values, fitted_values = temp_preds)
+```
+
+
+## Calculate new rho hat (correlation matrix) for copula
+
+```{r}
+corrmatrix_deaths = cov2cor(deaths_kgrmodel_fit$covmatrix)
+# matrix_heatmap(corrmatrix_deaths)
+
+corrmatrix_temp = cov2cor(temp_kgrmodel_fit$covmatrix)
+# matrix_heatmap(corrmatrix_temp)
+```
+
+## Evaluate the t copula for different values of nu to get max
+
+```{r}
+d = n*t
+
+yA = multimodal_df$excess_deaths
+yB = multimodal_df$avg_max_temp
+
+# yA = F_preds
+# yB = temp_preds
+
+uA = u_deaths 
+uB = u_temps
+
+
+log_multi_tcopula = function(yA,yB,uA,uB,rho_cross,nu,d){
+  
+  d_vals = exp(-0.5 * ((yA-yB)^2) / rho_cross^2)
+  rho_crossmatrix = diag(d_vals)
+  
+  top = cbind(corrmatrix_deaths,rho_crossmatrix)
+  bottom = cbind(t(rho_crossmatrix),corrmatrix_temp)
+  rho_matrix = rbind(top,bottom) 
+  
+  u = c(uA,uB)
+  
+  
+  t1 = lgamma(0.5*(nu + d)) - lgamma(0.5*nu) - (0.5*d)*log(pi*nu) 
+  t2 = -(det(rho_matrix))^(0.5)
+  t3 = -(0.5*(nu + d))*log(1 + ((1/nu) * t(u) %*% solve(rho_matrix) %*% u)) #produces NaN if log(-val)
+  
+  return(t1 + t2 + t3)
+}
+
+log_multi_tcopula(yA,yB,uA,uB,rho_cross = 0.01,nu = 2,d)
+```
+
+### Grid search function for rho_cross and nu
+
+```{r,warning=FALSE}
+set.seed(123)
+copula_hyper_grid = randomLHS(100,2)
+colnames(copula_hyper_grid) = c("rho_cross","nu")
+copula_hyper_grid[,1] = copula_hyper_grid[,1]*1000 
+copula_hyper_grid[,2] = round(copula_hyper_grid[,2]*100) 
+
+copula_grid_search = function(row,index){
+  x = row[1]
+  y = row[2]
+  
+  result <- tryCatch(
+  {
+    log_multi_tcopula(yA,yB,uA,uB,rho_cross = x,nu = y,d)
+  },
+  error = function(e) {
+    # Handle the error by printing a message and returning NULL
+    cat("Error in row", index, ":", conditionMessage(e), "\n")
+    return(NULL)
+  }
+  )
+
+  return(result)
+}
+
+
+logLik_vec <- sapply(seq_len(nrow(copula_hyper_grid)), function(i) {
+  result <- copula_grid_search(copula_hyper_grid[i, ], i)
+  if (is.null(result) || is.nan(result) || is.na(result) || is.infinite(result)) {
+    return(NA_real_)
+  }
+  return(result)
+})
+
+
+# logLik_vec <- sapply(seq_len(nrow(copula_hyper_grid)), function(i) {
+#   copula_grid_search(copula_hyper_grid[i, ], i)})
+
+best_idx = which.max(na.omit(logLik_vec))
+
+rho_cross = copula_hyper_grid[best_idx,1] #169.7751
+nu_hat = copula_hyper_grid[best_idx,2] #62
+```
+
+
+### Fill in off diagonal blocks with correlation matrix between modalities
+
+```{r}
+rho_cross = 0.01
+nu_hat = 2
+
+A = multimodal_df$excess_deaths
+B = multimodal_df$avg_max_temp
+
+# Compute diagonal of cross-kernel
+d_vals = exp(-0.5 * ((A-B)^2) / rho_cross^2)
+
+# Create diagonal matrix
+D = diag(d_vals)
+
+# modality_dependence_kernel = function(modality1,modality2,rho_cross = 1){
+#   K_cross = matrix(NA,nrow = n*t, ncol = n*t)
+#   
+#   for (i in 1:length(modality1)){
+#     for (j in 1:length(modality2)){
+#       if (i == j){
+#         correlation = exp(-0.5 * ((modality1[i] - modality2[j])^2) / rho_cross^2)
+#         K_cross[i,j] = correlation
+#       }
+#     }
+#   }
+#   
+#   return(K_cross)
+# }
+# 
+# test = modality_dependence_kernel(A,B,rho_cross = 1)
+
+top = cbind(corrmatrix_deaths,D)
+bottom = cbind(t(D),corrmatrix_temp)
+multimodal_corrmatrix = rbind(top,bottom)
+
+
+# # Force to nearest positive definite correlation matrix
+# near_corr <- nearPD(multimodal_corrmatrix, corr = TRUE)
+# 
+# # Extract usable matrix
+# multimodal_corrmatrix_fixed <- as.matrix(near_corr$mat)
+
+rho_hat = desingularize(multimodal_corrmatrix,threshold = 0.001,increment = 0.1)[[1]]
+```
+
+### Trying copula packages
+
+```{r,eval = FALSE}
+library(copula)
+
+# SAMPLE CODE
+
+# Define a 3-dimensional t-copula with df = 5 and some correlation matrix
+Sigma <- matrix(c(1, 0.7, 0.4,
+                  0.7, 1, 0.5,
+                  0.4, 0.5, 1), nrow = 3)
+
+t_cop <- tCopula(param = P2p(Sigma), dim = 3, df = 5, dispstr = "un")
+
+# Sample from it
+U <- rCopula(10, t_cop)
+
+# Inverse transform to get marginals (e.g., normal, gamma, poisson)
+X1 <- qnorm(U[,1])
+X2 <- qgamma(U[,2], shape = 2)
+X3 <- qpois(U[,3], lambda = 3)
+
+Sigma2 = equicorr(2,0.5)
+
+small_cop <- tCopula(param = P2p(Sigma2),dim = 2, df = 5)
+test_data <- matrix(runif(10 * 2), ncol = 2)
+dCopula(test_data, small_cop)
+```
+
+
+```{r,eval= FALSE}
+library(VineCopula)
+
+# Example for 3-dimensional t-copula R-vine
+d <- 3
+Matrix <- matrix(c(3, 2, 1,
+                   0, 2, 1,
+                   0, 0, 1), d, d)
+
+# t-copula for all pairwise copulas
+family <- matrix(0, d, d)
+family[2,1] <- 2  # (2,1)
+family[3,1] <- 2  # (3,1)
+family[3,2] <- 2  # (3,2 | 1)
+
+# Parameters: t-copula needs par (correlation) and par2 (df)
+par <- matrix(0, d, d)
+par[2,1] <- 0.5
+par[3,1] <- 0.6
+par[3,2] <- 0.4
+
+par2 <- matrix(0, d, d)
+par2[2,1] <- 5
+par2[3,1] <- 5
+par2[3,2] <- 5
+
+# Create the vine copula object
+RVM <- RVineMatrix(Matrix = Matrix, family = family, par = par, par2 = par2)
+
+# ---- Step 2: Simulate data ----
+set.seed(123)
+simdata <- RVineSim(1000, RVM)
+
+# ---- Step 3: Evaluate log-likelihood and density ----
+loglik <- RVineLogLik(simdata, RVM)
+print(loglik)
+
+dens <- RVinePDF(simdata, RVM)
+head(dens)
+```
+
+
+```{r,eval = FALSE}
+library(VineCopula)
+
+Udata = c(u_deaths,u_temps)
+
+#Fit vine copulas to blocks of the data (each month is a block)
+
+# Dimensions
+n_day <- 122
+n_loc <- 9
+n_mod <- 2
+n_per_day <- n_loc * n_mod
+
+# Define monthly blocks
+june_block_idx = c(1:270,1099:1368) #30
+july_block_idx = c(271:549,1369:1647) #31
+august_block_idx = c(550:828,1648:1926) #31
+september_block_idx = c(829:1098,1927:2196) #30
+
+# Subset Udata and correlation matrix
+U_block <- Udata[june_block_idx]
+R_block <- rho_hat[june_block_idx, june_block_idx]
+
+# # Convert correlation matrix to Kendall's tau
+# tau_block <- 2 / pi * asin(R_block)
+
+# You’ll need to extract off-diagonal pairs for the vine
+# For a D-vine: order variables as 1, 2, 3, ..., d
+d <- length(june_block_idx)
+
+vine_matrix <- matrix(NA, d, d)
+for (i in 1:d) {
+  vine_matrix[i:d, i] <- d:1
+}
+
+# Set up a list of copula families and parameters from the correlation matrix
+family_mat <- matrix(2, d, d)  # 2 = t-copula
+par_mat <- matrix(NA, d, d)
+par2_mat <- matrix(NA, d, d)    # fixed degrees of freedom nu_hat
+par2_mat[lower.tri(par2_mat, diag = FALSE)] = 20    # fixed degrees of freedom nu_hat
+
+# Fill in t-copula correlations
+par_mat = matrix(0,d,d)
+lower = lower.tri(R_block,diag = TRUE)
+par_mat[lower] = R_block[lower]
+```
+
+```{r,eval = FALSE}
+# Construct vine object
+vine <- RVineMatrix(
+  Matrix = structure_matrix,
+  family = family_mat,
+  par = par_mat,
+  par2 = par2_mat,
+  names = paste0("V", 1:d)
+)
+
+# Evaluate log-likelihood at U_block
+logLik_block <- RVineLogLik(U_block, vine)
+```
+
+
+
+
+# Instantiate actual copula with learned nu and rho_cross
+
+```{r,eval = FALSE}
+#Define the NT dimensional t copula
+t_cop <- tCopula(param = P2p(rho_hat), dim = 2*n*t, df = nu_hat, dispstr = "un")
+
+# Sample from it
+U <- rCopula(10, t_cop)
+```
+
+# Rolling forecast with samples from copula
+
+```{r,warning = FALSE}
+death_rolling_forecast_covGPs <- readRDS("death_rolling_forecast_covGPs2.rds")
+temp_rolling_forecast_covGPs <- readRDS("temp_rolling_forecast_covGPs2.rds")
+
+steps_ahead = 7
+
+# Get u samples for each forecast horizon time point 
+Uforecasts_deaths = list()
+Uforecasts_temps = list()
+
+insample_window = c(1:1044)
+
+for (i in 1:steps_ahead){
+  #Grab covGPs from sliding forecasts
+  cov_deaths = death_rolling_forecast_covGPs[[i]]
+  cov_temps = temp_rolling_forecast_covGPs[[i]]
+  
+  # Put together correlation matrix 
+  corrmatrix_deaths = cov2cor(cov_deaths)
+  corrmatrix_temp = cov2cor(cov_temps)
+  
+  d = nrow(corrmatrix_deaths)
+  
+  # Calculate off diagonal correlation matrix
+  A = multimodal_df$excess_deaths[insample_window]
+  B = multimodal_df$avg_max_temp[insample_window]
+  
+  # Compute diagonal of cross-kernel
+  d_vals = exp(-0.5 * ((A-B)^2) / rho_cross^2)
+  
+  # Create diagonal matrix
+  D = diag(d_vals)
+  
+  top = cbind(corrmatrix_deaths,D)
+  bottom = cbind(t(D),corrmatrix_temp)
+  multimodal_corrmatrix = rbind(top,bottom)
+  
+  # # Force to nearest positive definite correlation matrix
+  # near_corr <- nearPD(multimodal_corrmatrix, corr = TRUE)
+  # 
+  # # Extract usable matrix
+  # multimodal_corrmatrix_fixed <- as.matrix(near_corr$mat)
+  
+  rho_hat = desingularize(multimodal_corrmatrix,threshold = 0.001,increment = 0.1)[[1]]
+  
+  #Define the NT dimensional t copula
+  t_cop <- tCopula(param = P2p(rho_hat), dim = 2*d, df = nu_hat, dispstr = "un")
+  
+  # Sample from it
+  U <- rCopula(100, t_cop)
+  
+  #Extract u's for forecasted indices and transform back to F's with empirical CDF
+  forecast_udeaths = U[,(d-8):d] #each column is indexed the same as the rows in multimodal_df
+  forecast_utemps = U[,(2*d-8):(2*d)] #each column is indexed the same as the rows in multimodal_df
+  
+  Uforecasts_deaths[[i]] = forecast_udeaths
+  Uforecasts_temps[[i]] = forecast_utemps
+  
+  insample_window = insample_window + 9
+}
+```
+
+## Functions for transforming pseudo data Uhats to Fhats
+
+```{r}
+#Transform Us to Fs with inverse marginal CDF 
+death_rolling_forecast_mdists <- readRDS("death_rolling_forecast_mdists2.rds")
+temp_rolling_forecast_mdists <- readRDS("temp_rolling_forecast_mdists2.rds")
+
+inverse_cdf_from_marginal <- function(marginal, u) {
+  # Normalize the density
+  density <- marginal[, 2] / sum(marginal[, 2])
+  cdf_vals <- cumsum(density)
+  
+  # Ensure u is in [0,1]
+  u <- min(max(u, 0), 1)
+
+  # Find the smallest x such that CDF(x) >= u
+  idx <- which(cdf_vals >= u)[1]
+
+  if (is.na(idx)) {
+    return(NA)  # u > max(CDF), should not happen if u in [0,1]
+  } else {
+    return(marginal[idx, 1])
+  }
+}
+
+# test = Uforecasts_deaths[[1]][1,1]
+# test2 = death_rolling_forecast_mdists[[1]]
+# 
+# inverse_cdf_from_marginal(test2,test)
+
+
+# # Transform a single row for a specific time index
+# transform_single_row <- function(U_list, marginals, time_index, row_index) {
+#   stopifnot(time_index >= 1, time_index <= 7)
+#   
+#   U_matrix <- U_list[[time_index]]
+#   stopifnot(nrow(U_matrix) >= row_index)
+#   
+#   u_row <- U_matrix[row_index, ]  # length-9 vector
+#   transformed_row <- numeric(length(u_row))
+#   
+#   for (loc_index in seq_along(u_row)) {
+#     # Get the corresponding marginal index
+#     marginal_index <- (time_index - 1) * 9 + loc_index
+#     transformed_row[loc_index] <- inverse_cdf_from_marginal(
+#       marginals[[marginal_index]],
+#       u_row[loc_index]
+#     )
+#   }
+#   
+#   return(transformed_row)
+# }
+# 
+# 
+# transform_all_rows_for_time <- function(U_list, marginals, time_index) {
+#   stopifnot(time_index >= 1, time_index <= 7)
+#   
+#   U_matrix <- U_list[[time_index]]  # 100 x 9
+#   n_samples <- nrow(U_matrix)
+#   n_locations <- ncol(U_matrix)
+#   
+#   transformed_matrix <- matrix(NA, nrow = n_samples, ncol = n_locations)
+#   
+#   for (loc_index in 1:n_locations) {
+#     marginal_index <- (time_index - 1) * n_locations + loc_index
+#     marginal <- marginals[[marginal_index]]
+#     
+#     # Precompute normalized CDF
+#     density <- marginal[, 2] / sum(marginal[, 2])
+#     cdf_vals <- cumsum(density)
+#     x_vals <- marginal[, 1]
+#     
+#     # Vectorized inverse CDF for this location
+#     u_vals <- U_matrix[, loc_index]
+#     transformed_matrix[, loc_index] <- sapply(u_vals, function(u) {
+#       u <- min(max(u, 0), 1)
+#       idx <- which(cdf_vals >= u)[1]
+#       if (is.na(idx)) return(NA)
+#       return(x_vals[idx])
+#     })
+#   }
+#   
+#   return(transformed_matrix)
+# }
+# 
+# test = transform_all_rows_for_time(U_list = Uforecasts_deaths, marginals = death_rolling_forecast_mdists,
+#                                    time_index = 1)
+
+
+transform_all_time_points <- function(U_list, marginals) {
+  n_time_points <- length(U_list)
+  n_locations <- ncol(U_list[[1]])
+  
+  transformed_list <- vector("list", n_time_points)
+  
+  for (time_index in 1:n_time_points) {
+    U_matrix <- U_list[[time_index]]
+    n_samples <- nrow(U_matrix)
+    
+    transformed_matrix <- matrix(NA, nrow = n_samples, ncol = n_locations)
+    
+    for (loc_index in 1:n_locations) {
+      marginal_index <- (time_index - 1) * n_locations + loc_index
+      marginal <- marginals[[marginal_index]]
+      
+      # Normalize and get CDF
+      density <- marginal[, 2] / sum(marginal[, 2])
+      cdf_vals <- cumsum(density)
+      x_vals <- marginal[, 1]
+      
+      # Transform all samples for this location
+      u_vals <- U_matrix[, loc_index]
+      transformed_matrix[, loc_index] <- sapply(u_vals, function(u) {
+        u <- min(max(u, 0), 1)
+        idx <- which(cdf_vals >= u)[1]
+        if (is.na(idx)) return(NA)
+        return(x_vals[idx])
+      })
+    }
+    
+    transformed_list[[time_index]] <- transformed_matrix
+  }
+  
+  return(transformed_list)
+}
+
+# Run the transformation across all 7 time points
+Lhat_deaths <- transform_all_time_points(U_list = Uforecasts_deaths, 
+                                         marginals = death_rolling_forecast_mdists)
+
+Fhat_temps <- transform_all_time_points(U_list = Uforecasts_temps, 
+                                        marginals = temp_rolling_forecast_mdists)
+```
+
+
+## Transform FA's back into Lambda_A's for deaths (DON'T NEED I THINK)
+
+```{r,eval = FALSE}
+n_time_points = 7
+n_locations = 9
+
+# intercepts = deaths_outfit$model_summary[5:13,1]
+intercepts <- c(
+  "North East"               = deaths_outfit$model_summary[5,1],
+  "North West"               = deaths_outfit$model_summary[6,1],
+  "Yorkshire And The Humber" = deaths_outfit$model_summary[7,1],
+  "East Midlands"            =  deaths_outfit$model_summary[8,1],
+  "West Midlands"            =  deaths_outfit$model_summary[9,1],
+  "East"                     =  deaths_outfit$model_summary[10,1],
+  "London"                   = deaths_outfit$model_summary[11,1],
+  "South East"               =  deaths_outfit$model_summary[12,1],
+  "South West"               = deaths_outfit$model_summary[13,1]
+)
+
+
+desired_order <- c("East", "East Midlands", "London", "North East", 
+                   "North West", "South East", "South West", "West Midlands",
+                   "Yorkshire And The Humber")
+
+# Reorder using names
+reordered_intercepts <- intercepts[desired_order]
+
+Lhat_deaths = list()
+
+for (i in 1:n_time_points){
+  forecast_df = Fhat_deaths[[i]]
+  forecast_df = forecast_df + deaths_outfit$model_summary["factor(month)9",1]
+  
+  for (j in 1:n_locations){
+    forecast_df[,j] = forecast_df[,j] + reordered_intercepts[j]
+  }
+  
+  forecast_df = exp(forecast_df)
+  Lhat_deaths[[i]] = forecast_df
+}
+```
+
+
+## Calculate mean and credible intervals
+
+```{r}
+n_time_points = 7
+n_locations = 9
+
+death_copula_preds = data.frame()
+temp_copula_preds = data.frame()
+
+for(i in 1:n_time_points){
+  death_forecast_df = Lhat_deaths[[i]]
+  temp_forecast_df = Fhat_temps[[i]]
+  time = 115+i
+    
+  for (j in 1:n_locations){
+    #deaths  
+    mean1 = mean(death_forecast_df[,j],na.rm = TRUE)
+    lower1 = quantile(death_forecast_df[,j],0.025,na.rm = TRUE)
+    upper1 = quantile(death_forecast_df[,j],0.975,na.rm = TRUE)
+    
+    copula_preds1 = c(time,mean1,lower1,upper1)
+    death_copula_preds = rbind(temp_copula_preds,copula_preds1)
+    
+    
+    #temp
+    mean2 = mean(temp_forecast_df[,j],na.rm = TRUE)
+    lower2 = quantile(temp_forecast_df[,j],0.025,na.rm = TRUE)
+    upper2 = quantile(temp_forecast_df[,j],0.975,na.rm = TRUE)
+    
+    copula_preds2 = c(time,mean2,lower2,upper2)
+    temp_copula_preds = rbind(temp_copula_preds,copula_preds2)
+  }
+  
+}
+
+names = multimodal_df$region[1:9]
+region = rep(names,7)
+
+death_copula_preds = cbind(region,death_copula_preds)
+temp_copula_preds = cbind(region,temp_copula_preds)
+
+colnames(death_copula_preds) = c("region","time","mean","lower","upper")
+colnames(temp_copula_preds) = c("region","time","mean","lower","upper")
+```
+
+
+
+## Plot new forecasts
+
+
+### Rolling one step ahead forecast
+
+```{r,warning=FALSE}
+#Plot of posterior predictive estimates (days 116-122) with credible interval bands OVERLAID on response
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(excess_deaths)
+  preds = starting_data_deaths %>% dplyr::filter(region == regions[i]) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  title = sprintf(regions[i])
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=excess_deaths)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) +
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + 
+    theme_classic()
+  print(post_pred_plot)
+}
+```
+
+```{r}
+#Plot of posterior predictive estimates (days 116-122) with credible interval bands OVERLAID on response
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(avg_max_temp)
+  preds = starting_data_temp %>% dplyr::filter(region == regions[i]) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  title = sprintf(regions[i])
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=avg_max_temp)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) +
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + 
+    theme_classic()
+  print(post_pred_plot)
+}
+```
+
+### Copula forecasts
+
+```{r}
+final_death_preds = starting_data_deaths %>% select(region,time,excess_deaths,lower,upper)
+replace_idx = c(1036:nrow(final_death_preds))
+final_death_preds[replace_idx,] = death_copula_preds
+
+# final_death_preds$excess_deaths[1098] = 100
+# final_death_preds$upper[1098] = 200
+
+#Plot of posterior predictive estimates (days 116-122) with credible interval bands OVERLAID on response
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(excess_deaths)
+  preds = final_death_preds %>% dplyr::filter(region == regions[i]) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  title = sprintf(regions[i])
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=excess_deaths)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) +
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + 
+    theme_classic()
+  print(post_pred_plot)
+}
+```
+
+```{r}
+final_temp_preds = starting_data_temp %>% select(region,time,avg_max_temp,lower,upper)
+final_temp_preds[replace_idx,] = temp_copula_preds
+
+#Plot of posterior predictive estimates (days 116-122) with credible interval bands OVERLAID on response
+for (i in 1:n){
+  df = multimodal_df %>% dplyr::filter(region == regions[i]) %>% select(avg_max_temp)
+  preds = final_temp_preds %>% dplyr::filter(region == regions[i]) 
+  colnames(preds)[3] = "mean"
+  df = cbind(df,preds)
+  
+  title = sprintf(regions[i])
+  
+  post_pred_plot = df %>% ggplot(aes(x=time,y=avg_max_temp)) + geom_point() + 
+    geom_line(aes(y=mean),color = "red") + geom_ribbon(aes(ymin = lower,ymax = upper),alpha = 0.3) +
+    geom_vline(xintercept = 115,linetype = "dashed",color = "blue",linewidth = 1.5) + ggtitle(title) + 
+    theme_classic()
+  print(post_pred_plot)
+}
+```
+
+## Combine marginal and copula forecasts onto same plot
+
+```{r}
+#Deaths
+plot_data <- data.frame()
+
+for (i in 1:n){
+  # Observed data
+  observed_df <- multimodal_df %>%
+    dplyr::filter(region == regions[i]) %>%
+    select(time, excess_deaths) %>%
+    mutate(region = regions[i])
+  
+  # Forecast from model A (e.g., baseline)
+  forecast_a <- starting_data_deaths %>%
+    dplyr::filter(region == regions[i]) %>%
+    select(time, mean_a = excess_deaths)
+  
+  # Forecast from model B (e.g., copula)
+  forecast_b <- death_copula_preds %>%
+    dplyr::filter(region == regions[i]) %>%
+    select(time, mean_b = mean)
+  
+  # Merge all together
+  combined_df <- observed_df %>%
+    left_join(forecast_a, by = "time") %>%
+    left_join(forecast_b, by = "time")
+  
+  # Add date column
+  start_date <- as.Date("2018-06-01")  # adjust this to match your time = 1
+  combined_df <- combined_df %>%
+    mutate(date = start_date + time)
+  
+  # Split observed into pre and post
+  observed_pre <- combined_df %>% dplyr::filter(time <= 115)
+  observed_post <- combined_df %>% dplyr::filter(time >= 116)
+  forecast_lines <- combined_df %>% dplyr::filter(time >= 116)
+
+  # Append to full plot data
+  plot_data <- bind_rows(plot_data, combined_df)
+
+}
+
+# Trim for better visual clarity
+plot_data <- plot_data %>% dplyr::filter(time >= 93)
+
+p <- ggplot() +
+  geom_line(data = plot_data %>% dplyr::filter(time <= 115), 
+            aes(x = date, y = excess_deaths), color = "gray50") +
+  geom_point(data = plot_data %>% dplyr::filter(time >= 116), 
+             aes(x = date, y = excess_deaths), color = "black", size = 1.5) +
+  geom_line(data = plot_data %>% dplyr::filter(time >= 116), 
+            aes(x = date, y = mean_a), color = "black", linetype = "dotted", alpha = 0.7, linewidth = 0.7) +
+  geom_line(data = plot_data %>% dplyr::filter(time >= 116), 
+            aes(x = date, y = mean_b), color = "black", linetype = "longdash", alpha = 1, linewidth = 0.7) +
+  geom_vline(xintercept = as.Date("2021-09-23"),  # time = 115
+             linetype = "dashed", color = "blue", linewidth = 1) +
+  facet_wrap(~region) +
+  theme_minimal() + xlab("Date") + ylab("Excess Deaths") +
+  scale_x_date(date_breaks = "10 days", date_labels = "%b %d") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10))
+
+
+print(p)
+```
+
+
+```{r}
+#Temps
+plot_data <- data.frame()
+
+for (i in 1:n){
+  # Observed data
+  observed_df <- multimodal_df %>%
+    dplyr::filter(region == regions[i]) %>%
+    select(time, avg_max_temp) %>%
+    mutate(region = regions[i])
+  
+  # Forecast from model A (e.g., baseline)
+  forecast_a <- starting_data_temp %>%
+    dplyr::filter(region == regions[i]) %>%
+    select(time, mean_a = avg_max_temp)
+  
+  # Forecast from model B (e.g., copula)
+  forecast_b <- temp_copula_preds %>%
+    dplyr::filter(region == regions[i]) %>%
+    select(time, mean_b = mean)
+  
+  # Merge all together
+  combined_df <- observed_df %>%
+    left_join(forecast_a, by = "time") %>%
+    left_join(forecast_b, by = "time")
+  
+  # Add date column
+  start_date <- as.Date("2018-06-01")  # adjust this to match your time = 1
+  combined_df <- combined_df %>%
+    mutate(date = start_date + time)
+  
+  # Split observed into pre and post
+  observed_pre <- combined_df %>% dplyr::filter(time <= 115)
+  observed_post <- combined_df %>% dplyr::filter(time >= 116)
+  forecast_lines <- combined_df %>% dplyr::filter(time >= 116)
+
+  # Append to full plot data
+  plot_data <- bind_rows(plot_data, combined_df)
+
+}
+
+# Trim for better visual clarity
+plot_data <- plot_data %>% dplyr::filter(time >= 93)
+
+p <- ggplot() +
+  geom_line(data = plot_data %>% dplyr::filter(time <= 115), 
+            aes(x = date, y = avg_max_temp), color = "gray50") +
+  geom_point(data = plot_data %>% dplyr::filter(time >= 116), 
+             aes(x = date, y = avg_max_temp), color = "black", size = 1.5) +
+  geom_line(data = plot_data %>% dplyr::filter(time >= 116), 
+            aes(x = date, y = mean_a), color = "black", linetype = "dotted", alpha = 0.7, linewidth = 0.7) +
+  geom_line(data = plot_data %>% dplyr::filter(time >= 116), 
+            aes(x = date, y = mean_b), color = "black", linetype = "longdash", alpha = 0.7, linewidth = 0.7) +
+  geom_vline(xintercept = as.Date("2018-09-23"),  # time = 115
+             linetype = "dashed", color = "blue", linewidth = 1) +
+  facet_wrap(~region) +
+  theme_minimal() + xlab("Date") + ylab("Average Maximum Temperature") +
+  scale_x_date(date_breaks = "10 days", date_labels = "%b %d") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10))
+
+
+print(p)
+```
+
+
+## Calculate forecast performance metrics for copula forecasts 
+
+```{r}
+#Deaths
+MAE3 = c()
+MAPE3 = c()
+RMSPE3 = c()
+
+for (i in 116:122){
+  pred_df1 = final_death_preds %>% dplyr::filter(time == i) 
+  
+  est_lambda1 = rep(1,n)
+
+  for (j in 1:n){
+    actual_m = multimodal_df %>% dplyr::filter(region == regions[j], month == 9) %>% 
+      select(excess_deaths)
+    
+    est_lambda1[j] = mean(actual_m$excess_deaths)  
+    }
+  
+  MAE3 = c(MAE3,mean(abs(est_lambda1 - pred_df1$excess_deaths)))
+  MAPE3 = c(MAPE3,mean(abs((est_lambda1 - pred_df1$excess_deaths)/est_lambda1)))
+  RMSPE3 = c(RMSPE3,sqrt(mean((est_lambda1 - pred_df1$excess_deaths)^2)))
+}
+
+prop_model_error3 = cbind(MAE3,MAPE3,RMSPE3)
+
+
+#Temperature
+MAE4 = c()
+MAPE4 = c()
+RMSPE4 = c()
+
+for (i in 116:122){
+  pred_df2 = final_temp_preds %>% dplyr::filter(time == i) 
+  
+  actuals = rep(NA,n)
+  
+  for (j in 1:n){
+    actual = multimodal_df %>% dplyr::filter(region == regions[j], time == i) %>% 
+      select(avg_max_temp)
+    actuals[j] = actual$avg_max_temp
+  }
+  
+  MAE4 = c(MAE4,mean(abs(actuals - pred_df2$avg_max_temp)))
+  MAPE4 = c(MAPE4,mean(abs((actuals - pred_df2$avg_max_temp)/actuals)))
+  RMSPE4 = c(RMSPE4,sqrt(mean((actuals - pred_df2$avg_max_temp)^2)))
+}
+
+prop_model_error4 = cbind(MAE4,MAPE4,RMSPE4)
+```
+
+
+
+```{r}
+prop_model_error #marginal forecasts
+prop_model_error3 #copula forecasts
+```
+
+```{r}
+prop_model_error2 #marginal forecasts
+prop_model_error4 #copula forecasts
+```
+
+
+```{r}
+horizon_idx = c(1036:1098)
+
+deaths_true_values = multimodal_df$excess_deaths[horizon_idx]
+temps_true_values = multimodal_df$avg_max_temp[horizon_idx]
+
+lower_deaths_marginal = starting_data_deaths$lower[horizon_idx]
+upper_deaths_marginal = starting_data_deaths$upper[horizon_idx]
+
+lower_temps_marginal = starting_data_temp$lower[horizon_idx]
+upper_temps_marginal = starting_data_temp$upper[horizon_idx]
+
+lower_deaths_copula = final_death_preds$lower[horizon_idx]
+upper_deaths_copula = final_death_preds$upper[horizon_idx]
+
+lower_temps_copula = final_temp_preds$lower[horizon_idx]
+upper_temps_copula = final_temp_preds$upper[horizon_idx]
+
+
+#Deaths
+deaths_captured_marginal = (deaths_true_values >= lower_deaths_marginal & deaths_true_values <= upper_deaths_marginal)
+deaths_captured_copula = (deaths_true_values >= lower_deaths_copula & deaths_true_values <= upper_deaths_copula)
+
+coverage_deaths_marginal = sum(deaths_captured_marginal) / length(deaths_captured_marginal)  
+coverage_deaths_copula = sum(deaths_captured_copula) / length(deaths_captured_copula)  
+
+
+
+
+#Temperature
+temp_captured_marginal = (temps_true_values >= lower_temps_marginal & deaths_true_values <= upper_deaths_marginal)
+temp_captured_copula = (temps_true_values >= lower_temps_copula & deaths_true_values <= upper_temps_copula)
+
+coverage_temp_marginal = sum(temp_captured_marginal) / length(temp_captured_marginal)  
+coverage_temp_copula = sum(temp_captured_copula) / length(temp_captured_copula)      
+
+
+c(coverage_deaths_marginal,coverage_deaths_copula)
+c(coverage_temp_marginal,coverage_temp_copula)
+```
+
+
+
+
+
+
