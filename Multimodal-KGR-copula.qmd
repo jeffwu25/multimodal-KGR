@@ -1,5 +1,5 @@
 ---
-title: "Multimodal-KGR-4"
+title: "Multimodal-KGR-copula"
 format: html
 ---
 
