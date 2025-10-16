@@ -1,6 +1,5 @@
 ---
-title: "Multimodal-KGR"
-author: "Jeffrey Wu"
+title: "Multimodal-KGR-data"
 format: html
 ---
 

@@ -1,6 +1,5 @@
 ---
-title: "Multimodal-KGR-2-v3"
-author: "Jeffrey Wu"
+title: "Multimodal-KGR-marginals"
 format: html
 ---
 
