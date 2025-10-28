@@ -795,7 +795,7 @@ for(i in 1:n_time_points){
     upper1 = quantile(death_forecast_df[,j],0.975,na.rm = TRUE)
     
     copula_preds1 = c(time,mean1,lower1,upper1)
-    death_copula_preds = rbind(temp_copula_preds,copula_preds1)
+    death_copula_preds = rbind(death_copula_preds,copula_preds1)
     
     
     #temp
